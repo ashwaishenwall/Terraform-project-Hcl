@@ -1,5 +1,5 @@
 provider "aws" {
-  region = "us-east-1" # Replace with your preferred region
+  region = "us-east-1" # Replace with your preferred AWS region
 }
 
 # Use an existing VPC
@@ -42,38 +42,15 @@ resource "aws_security_group" "example" {
   }
 }
 
-# IAM Role for SSM Access
-resource "aws_iam_role" "ssm_role" {
-  name = "example-ssm-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        },
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-
-  tags = {
-    Name = "example-ssm-role"
-  }
+# Reference the existing SSM Role
+data "aws_iam_role" "existing_ssm_role" {
+  name = "your-existing-ssm-role-name" # Replace with the name of your existing SSM role
 }
 
-# Attach SSM Managed Policies to the IAM Role
-resource "aws_iam_role_policy_attachment" "ssm_access" {
-  role       = aws_iam_role.ssm_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-# Instance Profile for SSM Role
+# Instance Profile for the Existing SSM Role
 resource "aws_iam_instance_profile" "ssm_instance_profile" {
   name = "example-ssm-instance-profile"
-  role = aws_iam_role.ssm_role.name
+  role = data.aws_iam_role.existing_ssm_role.name
 }
 
 # Launch EC2 Instance in Private Subnet
