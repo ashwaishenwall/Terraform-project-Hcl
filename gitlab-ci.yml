@@ -1,0 +1,472 @@
+image: docker:latest
+
+services:
+  - name: docker:dind
+    command: ["--registry-mirror", "https://docker-proxy.industrysoftware.automation.siemens.com"]
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_AUTH_CONFIG: $DOCKER_AUTH_CONFIG
+  GITLAB_REGISTRY: "gitlab.industrysoftware.automation.siemens.com:4567"
+  GIT_USERNAME: $GIT_USERNAME
+  GIT_TOKEN: $GIT_TOKEN
+  INTERNAL_USER: $INTERNAL_USER
+  INTERNAL_TOKEN: $INTERNAL_TOKEN
+  TAG: "2.0.3"
+  
+  ##for internal gitab
+  SSH_PRIVATE_KEY: $SSH_PRIVATE_KEY
+  KNOWN_HOSTS_INTERNAL: $KNOWN_HOSTS
+  SSH_PRIVATE_KEY_INTERNAL_BASE64: $SSH_PRIVATE_KEY_BASE64
+  
+  ##for public gitlab
+  SSH_PRIVATE_KEY_GITLAB_BASE64: $SSH_PRIVATE_KEY_GITLAB_BASE64
+  KNOWN_HOSTS_GITLAB: $KNOWN_HOSTS_GITLAB
+  
+  CD_REPO_USER_NAME: $CD_REPO_USER_NAME 
+  CD_REPO_USER_EMAIL: $CD_REPO_USER_EMAIL
+
+  ##api variables:
+  tokenURL: "xc.us1.sws.siemens.com"
+  tenant: "xcdev"
+  developerConsoleAPIURL: "https://cloud.us1.sws.siemens.com/api/devopsservice/v2-earlyaccess"
+  internalName: "testcicdapp"
+  version: "v1.2.0"
+
+  # Bazel options.
+  # spawn_strategy is needed for the haxe rules to work (sandboxing not yet supported).
+  # test_output shows test failure logs.
+  # Verbose failures are typically good.
+  # When using the no_install toolchain in haxe, JAVA_HOME needs to be passed to the internal scripts.
+  # HAXE_HOME is used to find the local haxe.
+  # DOCKER_HOST provides the docker host in CI/CD images.
+  # Set the java version for haxe and maven.
+  # Specify the local java toolchain for Bazel.
+  BAZEL_OPTS: >
+      --spawn_strategy=local 
+      --test_output=errors 
+      --verbose_failures 
+      --action_env=JAVA_HOME 
+      --action_env=HAXE_HOME
+      --action_env=DOCKER_HOST 
+      --extra_toolchains=@local_jdk//:all
+      --java_language_version=17 
+      --java_runtime_version=17 
+      --tool_java_language_version=17 
+      --tool_java_runtime_version=17
+      --define=haxe_java_target_version=17
+      --define=maven_java_target_version=17
+
+stages:
+  - prepare
+  - unit-test
+  - build
+  - helm-update
+  - argocd-sync
+  - api-tests
+  - security-tests
+  - performance-tests
+  - register-api
+
+prepare:
+  stage: prepare
+  image: harbor.xcr.svcs01.prod.us-east-1.kaas.sws.siemens.com/oattccomp/workflow
+  script:
+    - if [ -z "$BUILD_ENV" ]; then echo "BUILD_ENV is not set"; exit 1; fi
+    - java -version
+    - bazel --version
+    - docker --version
+    - mvn --version
+  tags:
+    - docker
+  rules:
+    - if: '$BUILD_ENV == "api1"'
+  
+
+unit-test:
+  stage: unit-test
+  image: harbor.xcr.svcs01.prod.us-east-1.kaas.sws.siemens.com/oattccomp/workflow
+  script:
+    # Create SSH directory and set permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+
+    # Add both known_hosts entries to a single file
+    - echo "$KNOWN_HOSTS_INTERNAL" > ~/.ssh/known_hosts
+    - echo "$KNOWN_HOSTS_GITLAB" >> ~/.ssh/known_hosts
+    #- cat ~/.ssh/known_hosts
+
+    # Configure SSH for internal GitLab
+    - echo "$SSH_PRIVATE_KEY_INTERNAL_BASE64" | base64 -d > ~/.ssh/id_rsa
+    - chmod 400 ~/.ssh/id_rsa
+
+    # Configure SSH for public GitLab
+    - echo "$SSH_PRIVATE_KEY_GITLAB_BASE64" | base64 -d > ~/.ssh/id_rsa_gitlab
+    - chmod 400 ~/.ssh/id_rsa_gitlab
+   
+    # Create SSH config file
+    - echo -e "Host gitlab.industrysoftware.automation.siemens.com\n\tHostName gitlab.industrysoftware.automation.siemens.com\n\tIdentityFile ~/.ssh/id_rsa_gitlab\n" > ~/.ssh/config
+    - echo -e "Host asinternal.industrysoftware.automation.siemens.com\n\tHostName asinternal.industrysoftware.automation.siemens.com\n\tIdentityFile ~/.ssh/id_rsa\n" >> ~/.ssh/config
+    - chmod 400 ~/.ssh/config
+
+    # Export Docker credentials
+    - export DOCKER_CREDS_gitlab_industrysoftware_automation_siemens_com_4567=$GIT_USERNAME:$GIT_TOKEN
+    - export DOCKER_CREDS_asinternal_industrysoftware_automation_siemens_com=$INTERNAL_USER:$INTERNAL_TOKEN
+    - export DOCKER_CREDS_harbor_xcr_svcs01_prod_wv_kaas_sws_siemens_com=$HARBOR_USERNAME:$HARBOR_TOKEN
+
+    # Run Bazel test
+    - bazel run //:release-tests $BAZEL_OPTS
+  tags:
+    - docker
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+build:
+  stage: build
+  image: harbor.xcr.svcs01.prod.us-east-1.kaas.sws.siemens.com/oattccomp/workflow
+  script:
+    # Create SSH directory and set permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+
+    # Add both known_hosts entries to a single file
+    - echo "$KNOWN_HOSTS_INTERNAL" > ~/.ssh/known_hosts
+    - echo "$KNOWN_HOSTS_GITLAB" >> ~/.ssh/known_hosts
+    #- cat ~/.ssh/known_hosts
+
+    # Configure SSH for internal GitLab
+    - echo "$SSH_PRIVATE_KEY_INTERNAL_BASE64" | base64 -d > ~/.ssh/id_rsa
+    - chmod 400 ~/.ssh/id_rsa
+
+    # Configure SSH for public GitLab
+    - echo "$SSH_PRIVATE_KEY_GITLAB_BASE64" | base64 -d > ~/.ssh/id_rsa_gitlab
+    - chmod 400 ~/.ssh/id_rsa_gitlab
+
+    # Create SSH config file
+    - echo -e "Host gitlab.industrysoftware.automation.siemens.com\n\tHostName gitlab.industrysoftware.automation.siemens.com\n\tIdentityFile ~/.ssh/id_rsa_gitlab\n" > ~/.ssh/config
+    - echo -e "Host asinternal.industrysoftware.automation.siemens.com\n\tHostName asinternal.industrysoftware.automation.siemens.com\n\tIdentityFile ~/.ssh/id_rsa\n" >> ~/.ssh/config
+    - chmod 400 ~/.ssh/config
+
+    # Export Docker credentials
+    - export DOCKER_CREDS_gitlab_industrysoftware_automation_siemens_com_4567=$GIT_USERNAME:$GIT_TOKEN
+    - export DOCKER_CREDS_asinternal_industrysoftware_automation_siemens_com=$INTERNAL_USER:$INTERNAL_TOKEN
+    
+    # Conditional logic for build environment
+    - if [ "$BUILD_ENV" == "non-prod" ]; then
+        echo "Running non-prod build...";
+        export DOCKER_CREDS_harbor_xcr_svcs01_prod_wv_kaas_sws_siemens_com=$HARBOR_USERNAME:$HARBOR_TOKEN;
+        bazel run //:push-docker-xcr --action_env=DOCKER_CREDS_asinternal_industrysoftware_automation_siemens_com --action_env=DOCKER_CREDS_gitlab_industrysoftware_automation_siemens_com_4567 --action_env=DOCKER_CREDS_harbor_xcr_svcs01_prod_wv_kaas_sws_siemens_com $BAZEL_OPTS;
+      elif [ "$BUILD_ENV" == "prod" ]; then
+        echo "Running prod build...";
+        export DOCKER_CREDS_harbor_xcr_svcs01_prod_us_east_1_kaas_sws_siemens_com_mbse=$PROD_HARBOR_USERNAME:$PROD_HARBOR_TOKEN;
+        bazel run //:push-docker-xcr-prod --action_env=DOCKER_CREDS_asinternal_industrysoftware_automation_siemens_com --action_env=DOCKER_CREDS_gitlab_industrysoftware_automation_siemens_com_4567 --action_env=DOCKER_CREDS_harbor_xcr_svcs01_prod_us_east_1_kaas_sws_siemens_com_mbse $BAZEL_OPTS;
+      else
+        echo "Unknown build environment:\ $BUILD_ENV";
+        exit 1;
+      fi
+  tags:
+    - docker
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+helm:
+  stage: helm-update
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git openssh
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$KNOWN_HOSTS_GITLAB" > ~/.ssh/known_hosts
+    - echo "$SSH_PRIVATE_KEY_GITLAB_BASE64" | base64 -d > ~/.ssh/id_rsa_gitlab
+    - chmod 400 ~/.ssh/id_rsa_gitlab
+    - echo -e "Host gitlab.industrysoftware.automation.siemens.com\n\tHostName gitlab.industrysoftware.automation.siemens.com\n\tIdentityFile ~/.ssh/id_rsa_gitlab\n" > ~/.ssh/config
+    - chmod 400 ~/.ssh/config
+    - cat ~/.ssh/id_rsa_gitlab
+    - cat ~/.ssh/config
+    - git config --global user.name "$CD_REPO_USER_NAME"
+    - git config --global user.email "$CD_REPO_USER_EMAIL"
+  script:
+    # Conditional logic for Helm chart update based on environment
+    - if [ "$BUILD_ENV" == "non-prod" ]; then
+        echo "Deploying to non-prod...";
+        git clone git@gitlab.industrysoftware.automation.siemens.com:gitops/mbse.git;
+        cd mbse/kubernetes/mbse/disw-repo;
+        echo $TAG;
+        git checkout -b update-tag-$TAG;
+        sed -i "s|tag:.*|tag:\ ${TAG}|" values.yaml;
+        git add .;
+        git commit -m "Update image tag to $TAG";
+        git push origin update-tag-$TAG;
+        git checkout main;
+        git pull origin main;
+        git merge --no-ff update-tag-$TAG;
+        git push origin main;
+      elif [ "$BUILD_ENV" == "prod" ]; then
+        echo "Deploying to prod...";
+        git clone git@gitlab.industrysoftware.automation.siemens.com:gitops/mbse.git;
+        cd mbse/kubernetes/mbse-prod/disw-repo;
+        echo $TAG;
+        git checkout -b update-tag-$TAG;
+        sed -i "s|tag:.*|tag:\ ${TAG}|" values.yaml;
+        git add .;
+        git commit -m "Update image tag to $TAG";
+        git push origin update-tag-$TAG;
+        git checkout main;
+        git pull origin main;
+        git merge --no-ff update-tag-$TAG;
+        git push origin main;
+      else
+        echo "Unknown deployment environment:\ $BUILD_ENV";
+        exit 1;
+      fi
+  tags:
+    - docker
+    - linux
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+argocd:
+  stage: argocd-sync
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq  
+  script:
+    - echo "Please ensure the ArgoCD application is synchronized and healthy."
+    - echo "Login to https://argocd.xcr.svcs01.prod.wv.kaas.sws.siemens.com"
+    - echo "Verify application status in the ArgoCD dashboard."
+    - echo "Once confirmed, proceed with this manual job."
+  when: manual
+  allow_failure: false
+  tags:
+    - docker
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+api-functional-test:
+  stage: api-tests
+  script:
+    - |
+      if ($env:BUILD_ENV -eq "non-prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\testrunner.bat" -r -a -j -f"C:\\SysML\\Reports\\Report-$(Get-Date -f yyyyMMddHHmmss)" "-RJUnit-Style HTML Report" -FXML "-EOnprem Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } elseif ($env:BUILD_ENV -eq "prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\testrunner.bat" -r -a -j -f"C:\\SysML\\Reports\\Report-$(Get-Date -f yyyyMMddHHmmss)" "-RJUnit-Style HTML Report" -FXML "-EProduction Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } else {
+        Write-Output "Unknown environment: $env:BUILD_ENV"
+        exit 1
+      }
+  tags:
+    - sysml-win
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+api-security-test:
+  stage: security-tests
+  script:
+    - |
+      if ($env:SECURITY -eq "true" -and $env:BUILD_ENV -eq "non-prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\securitytestrunner.bat" -r -a -j -f"C:\\SysML\\SecurityTestReports\\SecurityTestReport-$(Get-Date -f yyyyMMddHHmmss)" "-RSecurity Issues Report" -FPDF "-EOnprem Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } elseif ($env:SECURITY -eq "true" -and $env:BUILD_ENV -eq "prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\securitytestrunner.bat" -r -a -j -f"C:\\SysML\\SecurityTestReports\\SecurityTestReport-$(Get-Date -f yyyyMMddHHmmss)" "-RSecurity Issues Report" -FPDF "-EProduction Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } else {
+        Write-Output "Security testing is disabled or unknown environment: $env:BUILD_ENV"
+        exit 1
+      }
+  tags:
+    - sysml-win
+  rules:
+    - if: '$SECURITY == "true" && ($BUILD_ENV == "non-prod" || $BUILD_ENV == "prod")'
+
+api-performance-test:
+  stage: performance-tests
+  script:
+    - |
+      if ($env:BUILD_ENV -eq "non-prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\loadtestrunner.bat" "-nRepository Service Load Test" -r"C:\\SysML\\PerformanceTestReports\\PerformanceTestReport-$(Get-Date -f yyyyMMddHHmmss)" -j "-EOnprem Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } elseif ($env:BUILD_ENV -eq "prod") {
+        & "C:\\PROGRA~1\\SmartBear\\ReadyAPI-3.53.0\\bin\\loadtestrunner.bat" "-nRepository Service Load Test" -r"C:\\SysML\\PerformanceTestReports\\PerformanceTestReport-$(Get-Date -f yyyyMMddHHmmss)" -j "-EProduction Deployment" "C:\\SysML\\SysML-readyapi-project.xml"
+      } else {
+        Write-Output "Unknown environment: $env:BUILD_ENV"
+        exit 1
+      }
+  tags:
+    - sysml-win
+  rules:
+    - if: '$BUILD_ENV == "non-prod" || $BUILD_ENV == "prod"'
+
+register-api:
+  stage: register-api
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    # Get OAuth Token
+    - echo "Getting OAuth Token..."
+    - |
+      token_response=$(curl -s --location --request POST "https://$tokenURL/oauth/token?grant_type=client_credentials&tenant=$tenant&iam-action=client_credentials.tenant-impersonation" \
+        --header "${AUTHORIZATION_TOKEN}")
+      xc_authorization=$(echo "$token_response" | jq -r '.access_token')
+      if [ -z "$xc_authorization" ] || [ "$xc_authorization" == "null" ]; then
+        echo "Error: Failed to retrieve OAuth token. Full response: $token_response"
+        exit 1
+      fi
+      echo "Token received: $xc_authorization"
+
+    # Get Application
+    - echo "Getting Application..."
+    - |
+      app_response=$(curl -s --location "$developerConsoleAPIURL/apps?applicationType=API&internalName=$internalName" \
+        --header "Authorization: Bearer $xc_authorization")
+      applicationId=$(echo "$app_response" | jq -r '.data[0].id // empty')
+      if [ -z "$applicationId" ]; then
+        echo "No application found with the specified internalName."
+        applicationId=null
+      fi
+      echo "Application ID: $applicationId"
+
+    # Check if application exists and handle versions
+    - |
+      if [ "$applicationId" != "null" ]; then
+        echo "Getting Application by ID..."
+        app_by_id_response=$(curl -s --location --globoff "$developerConsoleAPIURL/applications/$applicationId" \
+          --header "Authorization: Bearer $xc_authorization")
+        registeredVersionId=$(echo "$app_by_id_response" | jq -r '.versions[0].id // empty')
+        isRegistered=$(echo "$app_by_id_response" | jq -r '.versions[0].isRegistered // empty')
+        existingVersion=$(echo "$app_by_id_response" | jq -r '.versions[0].version // empty')
+        echo "Registered Version ID: $registeredVersionId"
+        echo "Is Registered: $isRegistered"
+        echo "Existing Version: $existingVersion"
+
+        # Check if the version matches the GitLab CI file version
+        echo "Checking registration status..."
+        if [ "$existingVersion" = "$version" ]; then
+          echo "Existing version matches the specified version. No need to create a new version."
+          newVersionId=$registeredVersionId
+          update_version="true"
+        else
+          echo "Version does not match the existing version. Deregistering the old version."
+
+          # Deregister the existing version if it is registered
+          if [ "$isRegistered" = "true" ]; then
+            echo "Deregistering Current Version..."
+            deregister_response=$(curl -s --location --request POST "$developerConsoleAPIURL/registration-jobs" \
+              --header "Content-Type: application/json" \
+              --header "Authorization: Bearer $xc_authorization" \
+              --data '{
+                "versionId": "'"$registeredVersionId"'",
+                "action": "Deregistration",
+                "postRegTierProvisioning": "default",
+                "performValidationsForPromote": true
+              }')
+            echo "Deregister Response: $deregister_response"
+
+            # Wait for deregistration to complete
+            deregistrationStatus=$(echo "$deregister_response" | jq -r '.registrationStatus')
+            deregistrationAttempts=0
+            while [ "$deregistrationStatus" != "Completed" ] && [ "$deregistrationAttempts" -lt 60 ]; do
+              echo "Waiting for deregistration to complete..."
+              sleep 10  # Wait for 10 seconds before checking again
+
+              # Re-check registration status
+              app_by_id_response=$(curl -s --location --globoff "$developerConsoleAPIURL/applications/$applicationId" \
+                --header "Authorization: Bearer $xc_authorization")
+              isRegistered=$(echo "$app_by_id_response" | jq -r '.versions[0].isRegistered // empty')
+              if [ "$isRegistered" != "true" ]; then
+                echo "Registration status changed. Exiting deregistration loop."
+                break
+              fi
+
+              deregister_response=$(curl -s --location "$developerConsoleAPIURL/registration-jobs/$registeredVersionId/status" \
+                --header "Authorization: Bearer $xc_authorization")
+              deregistrationStatus=$(echo "$deregister_response" | jq -r '.registrationStatus')
+              echo "Deregistration Status: $deregistrationStatus"
+              deregistrationAttempts=$((deregistrationAttempts + 1))
+            done
+            if [ "$deregistrationStatus" != "Completed" ] && [ "$isRegistered" = "true" ]; then
+              echo "Deregistration did not complete in a timely manner. Exiting."
+              exit 1
+            fi
+            echo "Deregistration completed."
+          else
+            echo "Version is not registered; skipping deregistration."
+          fi
+          
+          # Create a new application version after deregistration
+          echo "Creating new application version after deregistration..."
+
+          # Print the JSON payload
+          json_payload="{
+            \"applicationId\": \"$applicationId\",
+            \"version\": \"$version\",
+            \"applicationType\": \"API\",
+            \"components\": [
+              {
+                \"name\": \"default\",
+                \"url\": \"https://repository.mbse.preprod03.prod.us-east-1.kaas.sws.siemens.com\",
+                \"endpoints\": [
+                  {
+                    \"path\": \"/**\",
+                    \"actions\": [
+                      \"All\"
+                    ]
+                  }
+                ]
+              }
+            ],
+            \"roles\": [
+              {
+                \"isAdminRole\": true,
+                \"name\": \"xf:xcdev:testcicdapp:Administrator\",
+                \"displayName\": \"Administrator\",
+                \"description\": \"This is Admin Role\",
+                \"scopes\": [
+                  {
+                    \"name\": \"testcicdapp.default\",
+                    \"type\": \"APP_SCOPE\"
+                  }
+                ]
+              }
+            ],
+            \"description\": \"New version created after deregistration\"
+          }"
+
+          echo "JSON Payload: $json_payload"
+
+          # Send the payload
+          create_response=$(curl -s --location --request POST "$developerConsoleAPIURL/app-versions?cloneFromVersion=$registeredVersionId" \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer $xc_authorization" \
+            --data "$json_payload")
+          newVersionId=$(echo "$create_response" | jq -r '.id // empty')
+          if [ -z "$newVersionId" ]; then
+            echo "Error creating new application version. Response: $create_response"
+            exit 1
+          fi
+          echo "Created new application version ID: $newVersionId"
+        fi
+      else
+        echo "Application does not exist. Creating new application version."
+        update_version="false"
+      fi
+
+    # Register Version
+    - echo "Registering Application Version..."
+    - |
+      if [ -z "$newVersionId" ]; then
+        newVersionId=$registeredVersionId
+      fi
+      register_response=$(curl -s --location --request POST "$developerConsoleAPIURL/registration-jobs" \
+        --header "Content-Type: application/json" \
+        --header "Authorization: Bearer $xc_authorization" \
+        --data '{
+          "versionId": "'"$newVersionId"'",
+          "action": "Registration",
+          "postRegTierProvisioning": "default",
+          "performValidationsForPromote": true
+        }')
+      echo "Register Response: $register_response"
+      echo "Application version registered."
+
+  tags:
+    - docker
+  rules:
+    - if: '$BUILD_ENV == "api"'
