@@ -1,0 +1,40 @@
+microservice:
+  image:
+    repository: workflow-microservice-postgres
+    tag: latest
+  replicaCount: 1
+  service:
+    port: 8443
+  env:
+    DATABASE_HOST: "{{ .Values.postgresql.externalHost | default \"postgresnew\" }}"
+    SPRING_DATASOURCE_URL: jdbc:postgresql://{{ .Values.postgresql.externalHost | default "postgresnew" }}:5432/postgres
+  secret:
+    enabled: true
+    name: microservice-secret
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  livenessProbe:
+    httpGet:
+      path: /
+      port: 8443
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /
+      port: 8443
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+postgresql:
+  enabled: true
+  externalHost: ""
+  auth:
+    username: admin
+    password: manager
+    database: postgres

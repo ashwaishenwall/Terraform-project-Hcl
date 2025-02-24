@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microservice
+spec:
+  replicas: {{ .Values.microservice.replicaCount }}
+  selector:
+    matchLabels:
+      app: microservice
+  template:
+    metadata:
+      labels:
+        app: microservice
+    spec:
+      containers:
+        - name: microservice
+          image: {{ .Values.microservice.image.repository }}:{{ .Values.microservice.image.tag }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: {{ .Values.microservice.service.port }}
+          env:
+            {{- range $key, $value := .Values.microservice.env }}
+            - name: {{ $key }}
+              value: "{{ $value }}"
+            {{- end }}
+          resources:
+            requests:
+              cpu: {{ .Values.microservice.resources.requests.cpu }}
+              memory: {{ .Values.microservice.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.microservice.resources.limits.cpu }}
+              memory: {{ .Values.microservice.resources.limits.memory }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.microservice.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.microservice.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
