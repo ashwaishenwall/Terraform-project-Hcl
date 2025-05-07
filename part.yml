@@ -1,0 +1,103 @@
+stages:
+  - lint
+  - test
+  - cpipe/preprocess
+  - cpipe/preflight
+  - cpipe/lint
+  - cpipe/build
+  - cpipe/sign
+  - cpipe/scan
+  - cpipe/validate_CIS
+  - cpipe/publish
+  - cpipe/tag
+  - version
+  - release
+  - deploy
+
+include:
+  - project: 'chimera/container-pipeline'
+    ref: v1.0.3
+    file: '/templates/default.yaml'
+  - component: $CI_SERVER_FQDN/DevOps/cde/templates-examples/cde-components/automatic-versioning@v1.1.9
+    inputs:
+      enable_auto_versioning: true
+      enable_gitlab_release: false
+      branch_regex: main
+
+variables:
+  # ➤ Path to Dockerfile inside PartService
+  variables:
+  CONTAINER_REG_HARBOROP_HOST: https://harbor.xcr.svcs01.prod.wv.kaas.sws.siemens.com/
+  CONTAINER_REG_HARBOROP_USER: robot$$oat+cicd
+  CONTAINER_DEST_HARBOROP_PATH: harbor.xcr.svcs01.prod.wv.kaas.sws.siemens.com/oat/partservices
+  CONTAINER_REG_HARBORUE1_HOST: https://harbor.xcr.svcs01.prod.us-east-1.kaas.sws.siemens.com/
+  CONTAINER_REG_HARBORUE1_USER: robot$$oat+cicd
+  CONTAINER_DEST_HARBORUE1_PATH: harbor.xcr.svcs01.prod.us-east-1.kaas.sws.siemens.com/oat/partservices
+
+  CPIPE_REGISTER: true
+
+workflow:
+  rules:
+    # The container pipeline project doesn't like to run on merge requests.
+    - if: $CI_MERGE_REQUEST_IID
+      when: never
+    # Only publish images to Harbor on main branch or tags
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG
+      variables:
+        CPIPE_PUBLISH: true
+      when: always
+    - when: always
+
+cpipe/load scripts:
+  needs:
+    - lint
+
+# Install dependencies and lint
+lint:
+  stage: lint
+  image: node:23-alpine
+  script:
+    - apk add --no-cache bash
+    - yarn install --frozen-lockfile || npm ci
+    - yarn lint || npm run lint
+  tags:
+    - docker
+
+# Run unit tests
+test:
+  stage: test
+  image: node:23-alpine
+  script:
+    - yarn install --frozen-lockfile || npm ci
+    - yarn test || npm test
+  tags:
+    - docker
+
+# Build the Next.js app (optional, can be part of Docker)
+build:
+  stage: build
+  image: node:23-alpine
+  script:
+    - yarn install --frozen-lockfile || npm ci
+    - yarn build || npm run build
+  tags:
+    - docker
+  artifacts:
+    paths:
+      - .next
+
+deploy:
+  stage: deploy
+  image: alpine/helm:3.11.1
+  tags:
+    - docker
+    - linux
+  script:
+    - echo "Deploying to Kubernetes using Helm and ArgoCD..."
+    - helm upgrade --install partservice ./helm-chart \
+        --set image.repository=$CONTAINER_DEST_HARBOROP_PATH \
+        --set image.tag=$CI_COMMIT_SHORT_SHA
+    - argocd app sync partservice --auth-token $ARGOCD_AUTH_TOKEN
+    - argocd app wait partservice --auth-token $ARGOCD_AUTH_TOKEN
+  only:
+    - main
